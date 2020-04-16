@@ -1,115 +1,132 @@
 #!C:\Users\Lucas\Documents\Prog\dom-scraper\venv-wbs\Scripts\python.exe
+
+"""
+Converts PDF text content (though not images containing text) to plain text, html, xml or "tags".
+"""
+import argparse
+import logging
 import sys
-from pdfminer.pdfdocument import PDFDocument
-from pdfminer.pdfparser import PDFParser
-from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
-from pdfminer.pdfdevice import PDFDevice, TagExtractor
-from pdfminer.pdfpage import PDFPage
-from pdfminer.converter import XMLConverter, HTMLConverter, TextConverter
-from pdfminer.cmapdb import CMapDB
-from pdfminer.layout import LAParams
-from pdfminer.image import ImageWriter
+import pdfminer3.settings
+pdfminer3.settings.STRICT = False
+import pdfminer3.high_level
+import pdfminer3.layout
+from pdfminer3.image import ImageWriter
+
+
+def extract_text(files=[], outfile='-',
+            _py2_no_more_posargs=None,  # Bloody Python2 needs a shim
+            no_laparams=False, all_texts=None, detect_vertical=None, # LAParams
+            word_margin=None, char_margin=None, line_margin=None, boxes_flow=None, # LAParams
+            output_type='text', codec='utf-8', strip_control=False,
+            maxpages=0, page_numbers=None, password="", scale=1.0, rotation=0,
+            layoutmode='normal', output_dir=None, debug=False,
+            disable_caching=False, **other):
+    if _py2_no_more_posargs is not None:
+        raise ValueError("Too many positional arguments passed.")
+    if not files:
+        raise ValueError("Must provide files to work upon!")
+
+    # If any LAParams group arguments were passed, create an LAParams object and
+    # populate with given args. Otherwise, set it to None.
+    if not no_laparams:
+        laparams = pdfminer3.layout.LAParams()
+        for param in ("all_texts", "detect_vertical", "word_margin", "char_margin", "line_margin", "boxes_flow"):
+            paramv = locals().get(param, None)
+            if paramv is not None:
+                setattr(laparams, param, paramv)
+    else:
+        laparams = None
+
+    imagewriter = None
+    if output_dir:
+        imagewriter = ImageWriter(output_dir)
+
+    if output_type == "text" and outfile != "-":
+        for override, alttype in (  (".htm", "html"),
+                                    (".html", "html"),
+                                    (".xml", "xml"),
+                                    (".tag", "tag") ):
+            if outfile.endswith(override):
+                output_type = alttype
+
+    if outfile == "-":
+        outfp = sys.stdout
+        if outfp.encoding is not None:
+            codec = 'utf-8'
+    else:
+        outfp = open(outfile, "wb")
+
+
+    for fname in files:
+        with open(fname, "rb") as fp:
+            pdfminer3.high_level.extract_text_to_fp(fp, **locals())
+    return outfp
+
+
+def maketheparser():
+    parser = argparse.ArgumentParser(description=__doc__, add_help=True)
+    parser.add_argument("files", type=str, default=None, nargs="+", help="File to process.")
+    parser.add_argument("-d", "--debug", default=False, action="store_true", help="Debug output.")
+    parser.add_argument("-p", "--pagenos", type=str, help="Comma-separated list of page numbers to parse. Included for legacy applications, use --page-numbers for more idiomatic argument entry.")
+    parser.add_argument("--page-numbers", type=int, default=None, nargs="+", help="Alternative to --pagenos with space-separated numbers; supercedes --pagenos where it is used.")
+    parser.add_argument("-m", "--maxpages", type=int, default=0, help="Maximum pages to parse")
+    parser.add_argument("-P", "--password", type=str, default="", help="Decryption password for PDF")
+    parser.add_argument("-o", "--outfile", type=str, default="-", help="Output file (default \"-\" is stdout)")
+    parser.add_argument("-t", "--output_type", type=str, default="text", help="Output type: text|html|xml|tag (default is text)")
+    parser.add_argument("-c", "--codec", type=str, default="utf-8", help="Text encoding")
+    parser.add_argument("-s", "--scale", type=float, default=1.0, help="Scale")
+    parser.add_argument("-A", "--all-texts", default=None, action="store_true", help="LAParams all texts")
+    parser.add_argument("-V", "--detect-vertical", default=None, action="store_true", help="LAParams detect vertical")
+    parser.add_argument("-W", "--word-margin", type=float, default=None, help="LAParams word margin")
+    parser.add_argument("-M", "--char-margin", type=float, default=None, help="LAParams char margin")
+    parser.add_argument("-L", "--line-margin", type=float, default=None, help="LAParams line margin")
+    parser.add_argument("-F", "--boxes-flow", type=float, default=None, help="LAParams boxes flow")
+    parser.add_argument("-Y", "--layoutmode", default="normal", type=str, help="HTML Layout Mode")
+    parser.add_argument("-n", "--no-laparams", default=False, action="store_true", help="Pass None as LAParams")
+    parser.add_argument("-R", "--rotation", default=0, type=int, help="Rotation")
+    parser.add_argument("-O", "--output-dir", default=None, help="Output directory for images")
+    parser.add_argument("-C", "--disable-caching", default=False, action="store_true", help="Disable caching")
+    parser.add_argument("-S", "--strip-control", default=False, action="store_true", help="Strip control in XML mode")
+    return parser
+
 
 # main
-def main(argv):
-    import getopt
-    def usage():
-        print(f'usage: {argv[0]} [-P password] [-o output] [-t text|html|xml|tag]'
-               ' [-O output_dir] [-c encoding] [-s scale] [-R rotation]'
-               ' [-Y normal|loose|exact] [-p pagenos] [-m maxpages]'
-               ' [-S] [-C] [-n] [-A] [-V] [-M char_margin] [-L line_margin]'
-               ' [-W word_margin] [-F boxes_flow] [-d] input.pdf ...')
-        return 100
-    try:
-        (opts, args) = getopt.getopt(argv[1:], 'dP:o:t:O:c:s:R:Y:p:m:SCnAVM:W:L:F:')
-    except getopt.GetoptError:
-        return usage()
-    if not args: return usage()
-    # debug option
-    debug = 0
-    # input option
-    password = b''
-    pagenos = set()
-    maxpages = 0
-    # output option
-    outfile = None
-    outtype = None
-    imagewriter = None
-    rotation = 0
-    stripcontrol = False
-    layoutmode = 'normal'
-    encoding = 'utf-8'
-    pageno = 1
-    scale = 1
-    caching = True
-    showpageno = True
-    laparams = LAParams()
-    for (k, v) in opts:
-        if k == '-d': debug += 1
-        elif k == '-P': password = v.encode('ascii')
-        elif k == '-o': outfile = v
-        elif k == '-t': outtype = v
-        elif k == '-O': imagewriter = ImageWriter(v)
-        elif k == '-c': encoding = v
-        elif k == '-s': scale = float(v)
-        elif k == '-R': rotation = int(v)
-        elif k == '-Y': layoutmode = v
-        elif k == '-p': pagenos.update( int(x)-1 for x in v.split(',') )
-        elif k == '-m': maxpages = int(v)
-        elif k == '-S': stripcontrol = True
-        elif k == '-C': caching = False
-        elif k == '-n': laparams = None
-        elif k == '-A': laparams.all_texts = True
-        elif k == '-V': laparams.detect_vertical = True
-        elif k == '-M': laparams.char_margin = float(v)
-        elif k == '-W': laparams.word_margin = float(v)
-        elif k == '-L': laparams.line_margin = float(v)
-        elif k == '-F': laparams.boxes_flow = float(v)
-    #
-    PDFDocument.debug = debug
-    PDFParser.debug = debug
-    CMapDB.debug = debug
-    PDFPageInterpreter.debug = debug
-    #
-    rsrcmgr = PDFResourceManager(caching=caching)
-    if not outtype:
-        outtype = 'text'
-        if outfile:
-            if outfile.endswith('.htm') or outfile.endswith('.html'):
-                outtype = 'html'
-            elif outfile.endswith('.xml'):
-                outtype = 'xml'
-            elif outfile.endswith('.tag'):
-                outtype = 'tag'
-    if outfile:
-        outfp = open(outfile, 'w', encoding=encoding)
-    else:
-        outfp = sys.stdout
-    if outtype == 'text':
-        device = TextConverter(rsrcmgr, outfp, laparams=laparams,
-                               imagewriter=imagewriter)
-    elif outtype == 'xml':
-        device = XMLConverter(rsrcmgr, outfp, laparams=laparams,
-                              imagewriter=imagewriter,
-                              stripcontrol=stripcontrol)
-    elif outtype == 'html':
-        device = HTMLConverter(rsrcmgr, outfp, scale=scale,
-                               layoutmode=layoutmode, laparams=laparams,
-                               imagewriter=imagewriter, debug=debug)
-    elif outtype == 'tag':
-        device = TagExtractor(rsrcmgr, outfp)
-    else:
-        return usage()
-    for fname in args:
-        with open(fname, 'rb') as fp:
-            interpreter = PDFPageInterpreter(rsrcmgr, device)
-            for page in PDFPage.get_pages(fp, pagenos,
-                                          maxpages=maxpages, password=password,
-                                          caching=caching, check_extractable=True):
-                page.rotate = (page.rotate+rotation) % 360
-                interpreter.process_page(page)
-    device.close()
-    outfp.close()
-    return
 
-if __name__ == '__main__': sys.exit(main(sys.argv))
+
+def main(args=None):
+
+    P = maketheparser()
+    A = P.parse_args(args=args)
+
+    if A.page_numbers:
+        A.page_numbers = {x-1 for x in A.page_numbers}
+    if A.pagenos:
+        A.page_numbers = {int(x)-1 for x in A.pagenos.split(",")}
+
+    imagewriter = None
+    if A.output_dir:
+        imagewriter = ImageWriter(A.output_dir)
+
+    if A.output_type == "text" and A.outfile != "-":
+        for override, alttype in (  (".htm",  "html"),
+                                    (".html", "html"),
+                                    (".xml",  "xml" ),
+                                    (".tag",  "tag" ) ):
+            if A.outfile.endswith(override):
+                A.output_type = alttype
+
+    if A.outfile == "-":
+        outfp = sys.stdout
+        if outfp.encoding is not None:
+            # Why ignore outfp.encoding? :-/ stupid cathal?
+            A.codec = 'utf-8'
+    else:
+        outfp = open(A.outfile, "wb")
+
+    ## Test Code
+    outfp = extract_text(**vars(A))
+    outfp.close()
+    return 0
+
+
+if __name__ == '__main__': sys.exit(main())
